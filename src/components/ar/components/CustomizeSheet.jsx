@@ -111,6 +111,20 @@ const CustomizeSheet = ({
                 )}
               </label>
               <div className="flex gap-3 flex-wrap">
+                <button
+                  onClick={() => {
+                    onCustomize?.({ ...customization, color: null });
+                    if (currentAnchor) setModelColor(currentAnchor, null);
+                    triggerHaptic("light");
+                  }}
+                  className="group"
+                  title="Original"
+                >
+                  <div className={`w-10 h-10 rounded-full flex items-center justify-center active:scale-95 transition-all border-2 bg-[conic-gradient(#d6c7b4_0_25%,#4f5b4d_0_50%,#8d6e63_0_75%,#ece8e1_0)] ${!customization?.color ? "ring-2 ring-offset-2 ring-offset-black/80 ring-teal-400 scale-110 border-white/50" : "border-white/20"}`}>
+                    {!customization?.color && <IoCheckmarkCircle size={18} />}
+                  </div>
+                  <span className="text-[9px] text-white/50 mt-1 block text-center">Original</span>
+                </button>
                 {selectedProduct.colors.map((color, idx) => {
                   const hexColor = getColorHex(color);
                   return (

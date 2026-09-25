@@ -14,17 +14,14 @@ const ProductCatalog = ({
 }) => {
   return (
     <div
-      className="absolute bottom-0 left-0 right-0 bg-black/70 backdrop-blur-xl rounded-t-3xl z-40 safe-bottom"
+      className="absolute bottom-0 left-0 right-0 z-40 safe-bottom bg-linear-to-t from-black via-black/90 to-transparent pt-8"
       data-hide-on-capture
     >
-      <div className="flex justify-center pt-3 pb-2">
-        <div className="w-10 h-1 bg-white/30 rounded-full" />
-      </div>
 
-      <div className="flex justify-between items-center px-5 pb-3 gap-3">
+      <div className="flex justify-between items-end px-5 pb-3 gap-3">
         <div className="flex items-center gap-3 flex-1">
-          <div className="w-10 h-10 border border-white/20 rounded-full flex items-center justify-center">
-            <HiOutlineCube size={18} className="text-teal-400" />
+          <div className="w-10 h-10 border border-white/10 bg-white/5 backdrop-blur-xl rounded-2xl flex items-center justify-center">
+            <HiOutlineCube size={18} className="text-teal-300" />
           </div>
           <div>
             <h2
@@ -50,7 +47,7 @@ const ProductCatalog = ({
         </button>
       </div>
 
-      <div className="flex gap-3 px-5 pb-5 overflow-x-auto hide-scrollbar">
+      <div className="flex gap-3 px-5 pb-[calc(18px+env(safe-area-inset-bottom,0px))] overflow-x-auto hide-scrollbar snap-x snap-mandatory">
         {products.length === 0 ? (
           <div className="flex flex-col items-center justify-center w-full py-6 gap-2">
             <div className="w-12 h-12 border border-white/20 rounded-full flex items-center justify-center">
@@ -69,7 +66,7 @@ const ProductCatalog = ({
               <button
                 key={product._id || product.id}
                 onClick={() => onProductSelect(product)}
-                className="group shrink-0 flex flex-col items-center p-2 rounded-xl transition-all hover:bg-white/10"
+                className="group shrink-0 w-20 snap-start flex flex-col items-center p-2 rounded-2xl transition-all hover:bg-white/10"
               >
                 <div
                   className={`relative w-16 h-16 rounded-xl overflow-hidden transition-all ${

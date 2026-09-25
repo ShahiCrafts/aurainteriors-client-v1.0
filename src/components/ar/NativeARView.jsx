@@ -5,7 +5,7 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
-import { useARCore } from "capacitor-arcore";
+import { createARView } from "capacitor-arcore";
 import { IoClose, IoInformationCircle, IoCamera } from "react-icons/io5";
 import { MdOutlineViewInAr } from "react-icons/md";
 import { HiOutlineCube } from "react-icons/hi2";
@@ -43,21 +43,11 @@ const NativeARView = ({
 }) => {
   const overlayRef = useRef(null);
 
-  const {
-    isSupported,
-    isSessionActive,
-    placedModels,
-    error,
-    startSession,
-    stopSession,
-    hitTest,
-    placeModel,
-    removeModel,
-    transformModel,
-    setModelColor,
-    clearError,
-    getCamera,
-  } = useARCore();
+  const arViewRef = useRef(null);
+  const gestureCleanupRef = useRef(null);
+  const [isSupported, setIsSupported] = useState(null);
+  const [isSessionActive, setIsSessionActive] = useState(false);
+  const [arError, setArError] = useState(null);
 
   const [currentAnchor, setCurrentAnchor] = useState(null);
   const [showCustomize, setShowCustomize] = useState(false);
@@ -76,42 +66,18 @@ const NativeARView = ({
   const [screenshotError, setScreenshotError] = useState(null);
   const [tutorialStep, setTutorialStep] = useState(0);
 
-  const gestureRef = useRef({
-    isGesturing: false,
-    isDragging: false,
-    initialDistance: 0,
-    initialAngle: 0,
-    initialScale: 1,
-    initialRotation: 0,
-    initialPosition: [0, 0, 0],
-    lastTouchTime: 0,
-    touchStartTime: 0,
-    startX: 0,
-    startY: 0,
-    didRotateScale: false,
-    didDrag: false,
-    touchMoved: false,
-  });
-
   const categoryNames = useMemo(() => {
     return ["All", ...categories.map((c) => c.name)];
   }, [categories]);
 
   useEffect(() => {
-    if (!isSessionActive || hasPlacedModel) {
-      setSurfaceDetected(false);
-      return;
-    }
-
-    const checkSurface = async () => {
-      const result = await hitTest({ x: 0.5, y: 0.5 });
-      setSurfaceDetected(result.hit);
-    };
-
-    checkSurface();
-    const interval = setInterval(checkSurface, 500);
-    return () => clearInterval(interval);
-  }, [isSessionActive, hasPlacedModel, hitTest]);
+    const view = arViewRef.current;
+    if (!view || !isSessionActive) return;
+    const removeFrame = view.onFrame(() => {
+      setSurfaceDetected(Boolean(view.getSurface()?.hasSurface));
+    });
+    return () => removeFrame?.();
+  }, [isSessionActive]);
 
   const filteredProducts = useMemo(() => {
     let result = [...products];
@@ -152,311 +118,130 @@ const NativeARView = ({
     }
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    const view = createARView();
+    arViewRef.current = view;
+    view.checkSupport()
+      .then(({ supported, reason }) => {
+        if (!cancelled) {
+          setIsSupported(supported);
+          if (!supported && reason) setArError(reason);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setIsSupported(false);
+          setArError(err.message);
+        }
+      });
+    return () => {
+      cancelled = true;
+      gestureCleanupRef.current?.();
+      view.destroy().catch(() => {});
+      if (arViewRef.current === view) arViewRef.current = null;
+    };
+  }, []);
+
   const handleStartAR = useCallback(async () => {
-    if (isSupported && overlayRef.current) {
-      triggerHaptic("medium");
-      await startSession({
+    const view = arViewRef.current;
+    if (!isSupported || !overlayRef.current || !view) return;
+    triggerHaptic("medium");
+    try {
+      view.overlay = overlayRef.current;
+      await view.create({
+        overlay: overlayRef.current,
         planeDetection: true,
         lightEstimation: true,
-        domOverlay: overlayRef.current,
+        showReticle: true,
+        showPlaneDots: true,
+        showShadow: true,
       });
+      const modelUrls = products.map(getModelUrl).filter(Boolean);
+      view.preloadModels(modelUrls).catch(() => {});
+      gestureCleanupRef.current = view.enableCustomization({
+        modelUrl: () => getModelUrl(selectedProduct),
+        onTap: () => {
+          if (view.activeModelId) {
+            setCurrentAnchor(view.activeModelId);
+            setHasPlacedModel(true);
+            setShowActions((prev) => !prev);
+          }
+        },
+        onScale: () => { if (tutorialStep === 0) setTutorialStep(1); },
+        onRotate: () => { if (tutorialStep === 0) setTutorialStep(1); },
+      });
+      setIsSessionActive(true);
+      setArError(null);
+    } catch (err) {
+      setArError(err.message || "Failed to start AR");
+      setIsSessionActive(false);
     }
-  }, [isSupported, startSession, triggerHaptic]);
-
-  useEffect(
-    () => () => {
-      if (isSessionActive) stopSession();
-    },
-    [isSessionActive, stopSession]
-  );
-
-  const getDistance = (t1, t2) =>
-    Math.sqrt((t1.clientX - t2.clientX) ** 2 + (t1.clientY - t2.clientY) ** 2);
-  const getAngle = (t1, t2) =>
-    Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX) *
-    (180 / Math.PI);
+  }, [isSupported, products, selectedProduct, tutorialStep, triggerHaptic]);
 
   const placeModelAtCenter = useCallback(async () => {
-    if (isPlacing || !isSessionActive || !selectedProduct) return;
+    const view = arViewRef.current;
+    if (!view || isPlacing || !isSessionActive || !selectedProduct) return;
+    const modelUrl = getModelUrl(selectedProduct);
+    if (!modelUrl) return;
     setIsPlacing(true);
     triggerHaptic("medium");
-
-    const result = await hitTest({ x: 0.5, y: 0.5 });
-
-    if (result.hit) {
-      if (currentAnchor) {
-        await removeModel(currentAnchor);
-      }
-      try {
-        const modelUrl = getModelUrl(selectedProduct);
-        if (!modelUrl) {
-          triggerHaptic("error");
-          setIsPlacing(false);
-          return;
-        }
-
-        const response = await placeModel(
-          modelUrl,
-          result.position,
-          result.rotation,
-          [1, 1, 1]
-        );
-        const { anchorId } = response;
-        setCurrentAnchor(anchorId);
+    try {
+      const result = await view.placeModel(modelUrl, { x: 0.5, y: 0.5 });
+      if (result.success) {
+        setCurrentAnchor(result.modelId);
         setHasPlacedModel(true);
         triggerHaptic("success");
-      } catch (err) {
+      } else {
         triggerHaptic("error");
       }
+    } catch (err) {
+      setArError(err.message);
+      triggerHaptic("error");
+    } finally {
+      setIsPlacing(false);
     }
-    setIsPlacing(false);
-  }, [
-    isSessionActive,
-    selectedProduct,
-    isPlacing,
-    currentAnchor,
-    hitTest,
-    placeModel,
-    removeModel,
-    triggerHaptic,
-  ]);
+  }, [isSessionActive, selectedProduct, isPlacing, triggerHaptic]);
 
-  const handleTouchStart = useCallback(
-    (e) => {
-      if (!isSessionActive) return;
-      const touches = e.touches;
-      const g = gestureRef.current;
-
-      g.touchStartTime = Date.now();
-      g.touchMoved = false;
-      g.startX = touches[0].clientX;
-      g.startY = touches[0].clientY;
-
-      if (touches.length === 1 && currentAnchor) {
-        g.isDragging = true;
-        const model = placedModels.find((m) => m.anchorId === currentAnchor);
-        if (model) g.initialPosition = model.position || [0, 0, 0];
-      } else if (touches.length === 2 && currentAnchor) {
-        e.preventDefault();
-        g.isDragging = false;
-        g.isGesturing = true;
-        g.initialDistance = getDistance(touches[0], touches[1]);
-        g.initialAngle = getAngle(touches[0], touches[1]);
-        const model = placedModels.find((m) => m.anchorId === currentAnchor);
-        if (model) {
-          g.initialScale = model.scale?.[0] || 1;
-          const qy = model.rotation?.[1] || 0,
-            qw = model.rotation?.[3] || 1;
-          g.initialRotation =
-            Math.atan2(2 * qy * qw, 1 - 2 * qy * qy) * (180 / Math.PI);
-        }
-      }
-    },
-    [isSessionActive, currentAnchor, placedModels]
-  );
-
-  const handleTouchMove = useCallback(
-    (e) => {
-      if (!isSessionActive) return;
-      const touches = e.touches;
-      const g = gestureRef.current;
-
-      const moveDistance = Math.sqrt(
-        Math.pow(touches[0].clientX - g.startX, 2) +
-        Math.pow(touches[0].clientY - g.startY, 2)
-      );
-      if (moveDistance > 10) {
-        g.touchMoved = true;
-      }
-
-      if (!currentAnchor) return;
-
-      if (touches.length === 1 && g.isDragging && !g.isGesturing) {
-        const DRAG_SENSITIVITY = 0.0015;
-        const screenDeltaX = (touches[0].clientX - g.startX) * DRAG_SENSITIVITY;
-        const screenDeltaY = (touches[0].clientY - g.startY) * DRAG_SENSITIVITY;
-
-        const dragDistance = Math.sqrt(
-          Math.pow(touches[0].clientX - g.startX, 2) +
-          Math.pow(touches[0].clientY - g.startY, 2)
-        );
-        if (dragDistance > 20) {
-          g.didDrag = true;
-        }
-
-        const camera = getCamera();
-        let worldDeltaX = screenDeltaX;
-        let worldDeltaZ = screenDeltaY;
-
-        if (camera) {
-          const cameraRotationY = camera.rotation.y;
-          const cosY = Math.cos(cameraRotationY);
-          const sinY = Math.sin(cameraRotationY);
-          const rightX = cosY;
-          const rightZ = -sinY;
-          const forwardX = sinY;
-          const forwardZ = cosY;
-          worldDeltaX = screenDeltaX * rightX + screenDeltaY * forwardX;
-          worldDeltaZ = screenDeltaX * rightZ + screenDeltaY * forwardZ;
-        }
-
-        transformModel(currentAnchor, {
-          position: [
-            g.initialPosition[0] + worldDeltaX,
-            g.initialPosition[1],
-            g.initialPosition[2] + worldDeltaZ,
-          ],
-        });
-      } else if (touches.length === 2 && g.isGesturing) {
-        e.preventDefault();
-        const currentDistance = getDistance(touches[0], touches[1]);
-        const currentAngle = getAngle(touches[0], touches[1]);
-        const scaleRatio = currentDistance / g.initialDistance;
-        const newScale = Math.max(
-          0.2,
-          Math.min(3, g.initialScale * scaleRatio)
-        );
-        const angleDelta = currentAngle - g.initialAngle;
-        const newRotation = g.initialRotation + angleDelta;
-        const rad = (newRotation * Math.PI) / 180;
-
-        if (Math.abs(angleDelta) > 10 || Math.abs(scaleRatio - 1) > 0.1) {
-          g.didRotateScale = true;
-        }
-
-        transformModel(currentAnchor, {
-          scale: [newScale, newScale, newScale],
-          rotation: [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)],
-        });
-      }
-    },
-    [isSessionActive, currentAnchor, transformModel, getCamera]
-  );
-
-  const handleTouchEnd = useCallback(
-    async (e) => {
-      const g = gestureRef.current;
-      if (e.touches.length === 0) {
-        const touchDuration = Date.now() - g.touchStartTime;
-        const wasTap = !g.touchMoved && touchDuration < 300;
-
-        if (wasTap && !g.isGesturing && !g.didDrag && !g.didRotateScale) {
-          const now = Date.now();
-          if (now - g.lastTouchTime > 500) {
-            g.lastTouchTime = now;
-
-            if (!hasPlacedModel && surfaceDetected) {
-              await placeModelAtCenter();
-            } else if (hasPlacedModel) {
-              setShowActions((prev) => !prev);
-              setShowCustomize(false);
-              triggerHaptic("light");
-            }
-          }
-        }
-
-        if (g.didRotateScale && tutorialStep === 0) {
-          setTutorialStep(1);
-          triggerHaptic("success");
-        } else if (g.didDrag && tutorialStep === 1) {
-          setTutorialStep(2);
-          triggerHaptic("success");
-        }
-
-        g.didRotateScale = false;
-        g.didDrag = false;
-
-        if (g.isDragging && currentAnchor) {
-          const model = placedModels.find((m) => m.anchorId === currentAnchor);
-          if (model) g.initialPosition = model.position || [0, 0, 0];
-        }
-        g.isDragging = false;
-        g.isGesturing = false;
-        g.touchMoved = false;
-      } else if (e.touches.length < 2) g.isGesturing = false;
-    },
-    [
-      currentAnchor,
-      placedModels,
-      tutorialStep,
-      triggerHaptic,
-      hasPlacedModel,
-      surfaceDetected,
-      placeModelAtCenter,
-    ]
-  );
-
-  const handleTap = useCallback(
-    async (e) => {
-      const g = gestureRef.current;
-      if (g.isGesturing || g.isDragging) return;
-
-      const now = Date.now();
-      if (now - g.lastTouchTime < 500) return;
-
-      g.lastTouchTime = now;
-      e.stopPropagation();
-
-      if (!hasPlacedModel && surfaceDetected) {
-        await placeModelAtCenter();
-      } else if (hasPlacedModel) {
-        setShowActions((prev) => !prev);
-        setShowCustomize(false);
-        triggerHaptic("light");
-      }
-    },
-    [hasPlacedModel, surfaceDetected, placeModelAtCenter, triggerHaptic]
-  );
-
-  const handleRemoveModel = useCallback(() => {
-    if (currentAnchor) {
-      triggerHaptic("medium");
-      removeModel(currentAnchor);
-      setCurrentAnchor(null);
-      setHasPlacedModel(false);
-      setShowActions(false);
-      setShowCustomize(false);
-    }
-  }, [currentAnchor, removeModel, triggerHaptic]);
+  const handleRemoveModel = useCallback(async () => {
+    if (!arViewRef.current?.activeModelId) return;
+    triggerHaptic("medium");
+    await arViewRef.current.removeModel();
+    setCurrentAnchor(null);
+    setHasPlacedModel(false);
+    setShowActions(false);
+    setShowCustomize(false);
+  }, [triggerHaptic]);
 
   const handleChangeProduct = useCallback(
     async (product) => {
       onProductSelect(product);
       triggerHaptic("light");
-      if (hasPlacedModel && currentAnchor) {
-        setIsPlacing(true);
-        const result = await hitTest({ x: 0.5, y: 0.5 });
-        if (result.hit) {
-          await removeModel(currentAnchor);
-          try {
-            const modelUrl = getModelUrl(product);
-            if (modelUrl) {
-              const { anchorId } = await placeModel(
-                modelUrl,
-                result.position,
-                result.rotation,
-                [1, 1, 1]
-              );
-              setCurrentAnchor(anchorId);
-              triggerHaptic("success");
-            }
-          } catch (err) {
-            // Failed to place model
-          }
-        }
+      const view = arViewRef.current;
+      const modelUrl = getModelUrl(product);
+      if (!view || !modelUrl || !hasPlacedModel) return;
+      setIsPlacing(true);
+      try {
+        const result = await view.switchModel(modelUrl);
+        setCurrentAnchor(result.modelId || view.activeModelId);
+        triggerHaptic("success");
+      } catch (err) {
+        setArError(err.message);
+        triggerHaptic("error");
+      } finally {
         setIsPlacing(false);
       }
     },
-    [
-      hasPlacedModel,
-      currentAnchor,
-      onProductSelect,
-      hitTest,
-      removeModel,
-      placeModel,
-      triggerHaptic,
-    ]
+    [hasPlacedModel, onProductSelect, triggerHaptic]
   );
+
+  const setModelColor = useCallback(async (_anchorId, color) => {
+    try {
+      await arViewRef.current?.setColor(color);
+    } catch (err) {
+      setArError(err.message);
+    }
+  }, []);
 
   const calculateTotalPrice = useCallback(() => {
     if (!selectedProduct) return 0;
@@ -468,51 +253,28 @@ const NativeARView = ({
   }, [selectedProduct, customization]);
 
   const captureScreenshot = useCallback(async () => {
-    if (!isSessionActive || isCapturing) return;
+    const view = arViewRef.current;
+    if (!view || !isSessionActive || isCapturing) return;
     setIsCapturing(true);
     setShowActions(false);
     triggerHaptic("medium");
-
     try {
-      const uiElements = overlayRef.current?.querySelectorAll(
-        "[data-hide-on-capture]"
-      );
-      uiElements?.forEach((el) => (el.style.visibility = "hidden"));
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      let captured = false;
-
-      const canvases = document.querySelectorAll("canvas");
-      for (const canvas of canvases) {
-        if (canvas.width > 0 && canvas.height > 0) {
-          try {
-            const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-            if (dataUrl && dataUrl !== "data:," && dataUrl.length > 1000) {
-              setScreenshotData(dataUrl);
-              setShowScreenshotPreview(true);
-              triggerHaptic("success");
-              captured = true;
-              break;
-            }
-          } catch (e) {
-            // Canvas capture failed
-          }
-        }
+      const result = await view.takeScreenshot({ format: "jpeg", quality: 0.92, includeReticle: false });
+      const dataUrl = result?.dataUrl || result?.data;
+      if (result?.success !== false && dataUrl) {
+        setScreenshotData(dataUrl);
+        setShowScreenshotPreview(true);
+        triggerHaptic("success");
+      } else {
+        throw new Error(result?.error || "Could not capture AR view");
       }
-
-      if (!captured) {
-        triggerHaptic("error");
-        setScreenshotError("Could not capture AR view");
-        setTimeout(() => setScreenshotError(null), 3000);
-      }
-
-      uiElements?.forEach((el) => (el.style.visibility = "visible"));
     } catch (err) {
       triggerHaptic("error");
-      setScreenshotError("Screenshot failed");
+      setScreenshotError(err.message || "Screenshot failed");
       setTimeout(() => setScreenshotError(null), 3000);
+    } finally {
+      setIsCapturing(false);
     }
-    setIsCapturing(false);
   }, [isSessionActive, isCapturing, triggerHaptic]);
 
   const downloadScreenshot = useCallback(() => {
@@ -585,6 +347,7 @@ const NativeARView = ({
           </p>
         </div>
         <button
+            data-ui="true"
           onClick={onClose}
           className="mt-2 px-8 py-3 bg-teal-600 hover:bg-teal-700 text-white rounded-full font-medium transition-all duration-200 active:scale-95"
         >
@@ -612,6 +375,7 @@ const NativeARView = ({
           </p>
         </div>
         <button
+            data-ui="true"
           onClick={onClose}
           className="mt-2 px-8 py-3 bg-teal-600 hover:bg-teal-700 text-white rounded-full font-medium transition-all duration-200 active:scale-95"
         >
@@ -642,6 +406,7 @@ const NativeARView = ({
               augmented reality.
             </p>
             <button
+            data-ui="true"
               onClick={handleStartAR}
               className="w-full py-3.5 bg-teal-600 hover:bg-teal-700 text-white rounded-xl font-medium transition-all duration-200 active:scale-[0.98]"
             >
@@ -664,10 +429,6 @@ const NativeARView = ({
         {isSessionActive && (
           <div
             className="absolute inset-0 z-1"
-            onClick={handleTap}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
           >
             <ScanningOverlay
               hasPlacedModel={hasPlacedModel}
@@ -771,11 +532,11 @@ const NativeARView = ({
           onShare={shareScreenshot}
         />
 
-        {error && (
+        {arError && (
           <div className="absolute top-20 left-1/2 -translate-x-1/2 flex items-center gap-3 bg-rose-500/90 backdrop-blur-xl text-white px-5 py-3 rounded-full z-300 animate-[toast-in_0.3s_ease]">
-            <span className="text-sm font-medium">{error}</span>
+            <span className="text-sm font-medium">{arError}</span>
             <button
-              onClick={clearError}
+              onClick={() => setArError(null)}
               className="w-6 h-6 bg-white/20 rounded-full flex items-center justify-center active:scale-90 transition-all hover:bg-white/30"
             >
               <IoClose size={14} />
